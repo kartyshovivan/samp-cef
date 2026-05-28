@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
+use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -94,6 +95,47 @@ impl ExternalManager {
     }
 }
 
+fn load_external_plugin(external: &mut ExternalManager, path: &Path) {
+    unsafe {
+        match Library::new(path.as_os_str()) {
+            Ok(mut lib) => {
+                let library: &'static mut Library = &mut *(&mut lib as *mut Library);
+
+                let mainloop = library.get::<extern "C" fn()>(b"cef_samp_mainloop").ok();
+
+                let dxreset = library.get::<extern "C" fn()>(b"cef_dxreset").ok();
+                let initialize = library
+                    .get::<extern "C" fn(*mut InternalApi)>(b"cef_initialize")
+                    .ok();
+
+                let connect = library.get::<extern "C" fn()>(b"cef_connect").ok();
+                let disconnect = library.get::<extern "C" fn()>(b"cef_disconnect").ok();
+                let quit = library.get::<extern "C" fn()>(b"cef_quit").ok();
+                let browser_created = library
+                    .get::<extern "C" fn(u32, i32)>(b"cef_browser_created")
+                    .ok();
+
+                let plugin = ExtPlugin {
+                    library: lib,
+                    initialize,
+                    mainloop,
+                    dxreset,
+                    connect,
+                    disconnect,
+                    quit,
+                    browser_created,
+                };
+
+                external.plugins.push(plugin);
+
+                log::trace!("loaded plugin: {:?}", path);
+            }
+
+            Err(e) => log::trace!("error loading library {:?}: {:?}", path, e),
+        }
+    }
+}
+
 pub fn initialize(event_tx: Sender<Event>, manager: Arc<Mutex<Manager>>) -> CallbackList {
     let callbacks = Arc::new(Mutex::new(HashMap::new()));
 
@@ -107,52 +149,21 @@ pub fn initialize(event_tx: Sender<Event>, manager: Arc<Mutex<Manager>>) -> Call
 
     let external = unsafe { PLUGINS.set(external) };
 
-    let plugins_path = crate::utils::cef_dir().join("plugins");
+    let cef_dir = crate::utils::cef_dir();
+    let bundled_interface = cef_dir.join("cef_interface.dll");
+
+    if bundled_interface.is_file() {
+        load_external_plugin(external, &bundled_interface);
+    }
+
+    let plugins_path = cef_dir.join("plugins");
 
     if let Ok(rd) = std::fs::read_dir(plugins_path) {
         for dir in rd.filter_map(|dir| dir.ok()) {
             if let Some(ext) = dir.path().extension()
                 && ext.to_string_lossy() == "dll"
             {
-                unsafe {
-                    match Library::new(dir.path().as_os_str()) {
-                        Ok(mut lib) => {
-                            let library: &'static mut Library = &mut *(&mut lib as *mut Library);
-
-                            let mainloop =
-                                library.get::<extern "C" fn()>(b"cef_samp_mainloop").ok();
-
-                            let dxreset = library.get::<extern "C" fn()>(b"cef_dxreset").ok();
-                            let initialize = library
-                                .get::<extern "C" fn(*mut InternalApi)>(b"cef_initialize")
-                                .ok();
-
-                            let connect = library.get::<extern "C" fn()>(b"cef_connect").ok();
-                            let disconnect = library.get::<extern "C" fn()>(b"cef_disconnect").ok();
-                            let quit = library.get::<extern "C" fn()>(b"cef_quit").ok();
-                            let browser_created = library
-                                .get::<extern "C" fn(u32, i32)>(b"cef_browser_created")
-                                .ok();
-
-                            let plugin = ExtPlugin {
-                                library: lib,
-                                initialize,
-                                mainloop,
-                                dxreset,
-                                connect,
-                                disconnect,
-                                quit,
-                                browser_created,
-                            };
-
-                            external.plugins.push(plugin);
-
-                            log::trace!("loaded plugin: {:?}", dir.path());
-                        }
-
-                        Err(e) => log::trace!("error loading library {:?}", e),
-                    }
-                }
+                load_external_plugin(external, &dir.path());
             }
         }
     }

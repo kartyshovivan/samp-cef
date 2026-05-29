@@ -49,7 +49,7 @@ impl Render {
         counter.frames += 1;
 
         if counter.frames == REFERENCE_FRAMES {
-            let elapsed = counter.start_at.elapsed().as_millis() as u64;
+            let elapsed = std::cmp::max(1, counter.start_at.elapsed().as_millis() as u64);
 
             let fps = (REFERENCE_FRAMES * 1000) / elapsed;
 

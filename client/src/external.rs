@@ -34,6 +34,7 @@ pub struct ExternalManager {
     event_tx: Sender<Event>,
     callbacks: CallbackList,
     plugins: Vec<ExtPlugin>,
+    ready: AtomicBool,
     window_active: AtomicBool,
 }
 
@@ -144,6 +145,7 @@ pub fn initialize(event_tx: Sender<Event>, manager: Arc<Mutex<Manager>>) -> Call
         event_tx,
         callbacks: callbacks.clone(),
         plugins: Vec::new(),
+        ready: AtomicBool::new(false),
         window_active: AtomicBool::new(true),
     };
 
@@ -193,6 +195,8 @@ pub fn call_dxreset() {
 
 pub fn call_initialize() {
     if let Some(ext) = ExternalManager::get() {
+        ext.ready.store(true, Ordering::SeqCst);
+
         let mut api = make_api_struct();
 
         for plugin in &ext.plugins {
@@ -231,6 +235,8 @@ pub fn window_active(active: bool) {
 
 pub fn quit() {
     if let Some(ext) = ExternalManager::get() {
+        ext.ready.store(false, Ordering::SeqCst);
+
         for mut plugin in ext.plugins.drain(..) {
             if let Some(quit) = plugin.quit.as_mut() {
                 quit();
@@ -332,9 +338,10 @@ unsafe extern "C" fn cef_input_available(browser: u32) -> bool {
         .unwrap_or(false)
 }
 
-// TODO: ?
 unsafe extern "C" fn cef_ready() -> bool {
-    false
+    ExternalManager::get()
+        .map(|ext| ext.ready.load(Ordering::SeqCst))
+        .unwrap_or(false)
 }
 
 unsafe extern "C" fn cef_try_focus_browser(browser: u32) -> bool {

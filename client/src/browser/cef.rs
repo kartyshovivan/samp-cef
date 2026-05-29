@@ -37,8 +37,8 @@ impl App for DefaultApp {
     fn on_before_command_line_processing(
         &self, _process_type: CefString, command_line: CommandLine,
     ) {
-        command_line.append_switch("disable-gpu-compositing");
-        command_line.append_switch("disable-gpu");
+        command_line.append_switch("enable-gpu-compositing");
+        command_line.append_switch("enable-features=NetworkService,NetworkServiceInProcess");
         command_line.append_switch("enable-begin-frame-scheduling");
         command_line.append_switch_with_value("autoplay-policy", "no-user-gesture-required");
 

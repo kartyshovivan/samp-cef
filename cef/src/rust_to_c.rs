@@ -8,6 +8,8 @@ pub mod audio_handler;
 pub mod browser_process_handler;
 pub mod client;
 pub mod context_menu_handler;
+pub mod display_handler;
+pub mod jsdialog_handler;
 pub mod lifespan_handler;
 pub mod load_handler;
 pub mod render_handler;
@@ -102,6 +104,7 @@ mod tests {
     use crate::handlers::audio::AudioHandler;
     use crate::handlers::browser_process::BrowserProcessHandler;
     use crate::handlers::context_menu::ContextMenuHandler;
+    use crate::handlers::display::DisplayHandler;
     use crate::handlers::lifespan::LifespanHandler;
     use crate::handlers::load::LoadHandler;
     use crate::handlers::render::{DirtyRects, PaintElement, RenderHandler};
@@ -112,8 +115,9 @@ mod tests {
     use crate::v8::V8Value;
     use cef_sys::{
         cef_app_t, cef_audio_handler_t, cef_browser_process_handler_t, cef_client_t,
-        cef_context_menu_handler_t, cef_life_span_handler_t, cef_load_handler_t, cef_rect_t,
-        cef_render_handler_t, cef_render_process_handler_t, cef_task_t, cef_v8handler_t,
+        cef_context_menu_handler_t, cef_display_handler_t, cef_jsdialog_handler_t,
+        cef_life_span_handler_t, cef_load_handler_t, cef_rect_t, cef_render_handler_t,
+        cef_render_process_handler_t, cef_task_t, cef_v8handler_t,
     };
 
     struct DropTracker {
@@ -194,6 +198,9 @@ mod tests {
         }
     }
 
+    struct DummyDisplayHandler;
+    impl DisplayHandler for DummyDisplayHandler {}
+
     struct DummyLifespanHandler;
     impl LifespanHandler for DummyLifespanHandler {
         fn on_after_created(&self, _browser: crate::browser::Browser) {}
@@ -211,6 +218,7 @@ mod tests {
         type LifespanHandler = DummyLifespanHandler;
         type RenderHandler = DummyRenderHandler;
         type ContextMenuHandler = DummyContextMenuHandler;
+        type DisplayHandler = DummyDisplayHandler;
         type LoadHandler = DummyLoadHandler;
         type AudioHandler = DummyAudioHandler;
     }
@@ -332,6 +340,30 @@ mod tests {
             assert!(cef.on_text_selection_changed.is_some());
             assert!(cef.on_virtual_keyboard_requested.is_some());
             drop_wrapper::<cef_render_handler_t, DummyRenderHandler>(ptr);
+        }
+    }
+
+    #[test]
+    fn wrap_display_handler_sets_callbacks() {
+        let ptr = super::display_handler::wrap(DummyDisplayHandler);
+        unsafe {
+            let cef: cef_display_handler_t =
+                read_cef_object::<cef_display_handler_t, DummyDisplayHandler>(ptr);
+            assert!(cef.on_cursor_change.is_some());
+            drop_wrapper::<cef_display_handler_t, DummyDisplayHandler>(ptr);
+        }
+    }
+
+    #[test]
+    fn wrap_jsdialog_handler_sets_callbacks() {
+        let ptr = super::jsdialog_handler::wrap();
+        unsafe {
+            let cef: cef_jsdialog_handler_t = read_cef_object::<cef_jsdialog_handler_t, ()>(ptr);
+            assert!(cef.on_jsdialog.is_some());
+            assert!(cef.on_before_unload_dialog.is_some());
+            assert!(cef.on_reset_dialog_state.is_some());
+            assert!(cef.on_dialog_closed.is_some());
+            drop_wrapper::<cef_jsdialog_handler_t, ()>(ptr);
         }
     }
 

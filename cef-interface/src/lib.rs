@@ -133,10 +133,10 @@ pub extern "C" fn cef_quit() {
 
 extern "C" fn set_component_visible(_: *const c_char, args: *mut cef_list_value_t) -> i32 {
     if let Some(args) = List::try_from_raw(args)
-        && args.len() == 3
+        && args.len() == 2
     {
-        let name = args.string(1).to_string();
-        let visible = args.bool(2);
+        let name = args.string(0).to_string();
+        let visible = args.bool(1);
 
         if let Some(app_cell) = APP.get()
             && let Ok(mut app_slot) = app_cell.lock()
@@ -151,10 +151,10 @@ extern "C" fn set_component_visible(_: *const c_char, args: *mut cef_list_value_
 
 extern "C" fn poll_player_stats(_: *const c_char, args: *mut cef_list_value_t) -> i32 {
     if let Some(args) = List::try_from_raw(args)
-        && args.len() == 3
+        && args.len() == 2
     {
-        let poll = args.bool(1);
-        let interval = args.integer(2);
+        let poll = args.bool(0);
+        let interval = args.integer(1);
 
         if let Some(app_cell) = APP.get()
             && let Ok(mut app_slot) = app_cell.lock()

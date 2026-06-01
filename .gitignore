@@ -9,6 +9,3 @@ deploy.cmd
 
 # deps
 .deps/
-
-# vs
-.vs/

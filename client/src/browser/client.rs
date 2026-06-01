@@ -14,12 +14,11 @@ use cef::browser::{Browser, ContextMenuParams, Frame, MenuModel};
 use cef::client::Client;
 use cef::handlers::audio::AudioHandler;
 use cef::handlers::context_menu::ContextMenuHandler;
-use cef::handlers::display::DisplayHandler;
 use cef::handlers::lifespan::LifespanHandler;
 use cef::handlers::load::LoadHandler;
 use cef::handlers::render::{DirtyRects, PaintElement, RenderHandler};
 use cef::process_message::ProcessMessage;
-use cef::types::list::{List, ValueType};
+use cef::types::list::ValueType;
 
 use cef_sys::{cef_audio_parameters_t, cef_rect_t};
 
@@ -125,7 +124,6 @@ impl Client for WebClientRef {
     type LifespanHandler = Self;
     type RenderHandler = Self;
     type ContextMenuHandler = Self;
-    type DisplayHandler = Self;
     type LoadHandler = Self;
     type AudioHandler = Self;
 
@@ -138,10 +136,6 @@ impl Client for WebClientRef {
     }
 
     fn context_menu_handler(&self) -> Option<Self> {
-        Some(self.clone())
-    }
-
-    fn display_handler(&self) -> Option<Self> {
         Some(self.clone())
     }
 
@@ -211,8 +205,7 @@ impl Client for WebClientRef {
 
                 if let Some(cb) = callbacks.get(&event_name) {
                     let name = CString::new(event_name.clone()).unwrap(); // 100% valid string
-                    let callback_args = copy_event_args(&args, 1);
-                    let result = cb(name.as_ptr(), callback_args.into_cef());
+                    let result = cb(name.as_ptr(), args.clone().into_cef());
 
                     // событие обработано плагином, нет смысла отправлять дальше серверу
                     if result == EXTERNAL_BREAK {
@@ -249,47 +242,9 @@ impl Client for WebClientRef {
     }
 }
 
-fn copy_event_args(args: &List, offset: usize) -> List {
-    let list = List::new();
-
-    for (dst, src) in (offset..args.len()).enumerate() {
-        match args.get_type(src) {
-            ValueType::String => {
-                let value = args.string(src);
-                list.set_string(dst, &value);
-            }
-            ValueType::Bool => list.set_bool(dst, args.bool(src)),
-            ValueType::Double => list.set_double(dst, args.double(src)),
-            ValueType::Integer => list.set_integer(dst, args.integer(src)),
-            ValueType::List => {
-                if let Some(value) = args.list(src) {
-                    list.set_list(dst, value.clone());
-                }
-            }
-            _ => list.set_null(dst),
-        }
-    }
-
-    list
-}
-
 impl ContextMenuHandler for WebClientRef {
     fn on_before_context_menu(&self, _: Browser, _: Frame, _: ContextMenuParams, model: MenuModel) {
         model.clear(); // remove context menu
-    }
-}
-
-impl DisplayHandler for WebClientRef {
-    fn on_cursor_change(&self, _: Browser, cursor: cef_sys::HCURSOR) -> bool {
-        if cursor.is_null() {
-            return false;
-        }
-
-        unsafe {
-            winapi::um::winuser::SetCursor(cursor as winapi::shared::windef::HCURSOR);
-        }
-
-        true
     }
 }
 

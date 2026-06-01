@@ -1,6 +1,5 @@
 use crate::handlers::audio::AudioHandler;
 use crate::handlers::context_menu::ContextMenuHandler;
-use crate::handlers::display::DisplayHandler;
 use crate::handlers::lifespan::LifespanHandler;
 use crate::handlers::load::LoadHandler;
 use crate::handlers::render::RenderHandler;
@@ -13,7 +12,6 @@ pub trait Client {
     type LifespanHandler: LifespanHandler;
     type RenderHandler: RenderHandler;
     type ContextMenuHandler: ContextMenuHandler;
-    type DisplayHandler: DisplayHandler;
     type LoadHandler: LoadHandler;
     type AudioHandler: AudioHandler;
 
@@ -26,10 +24,6 @@ pub trait Client {
     }
 
     fn context_menu_handler(&self) -> Option<Self::ContextMenuHandler> {
-        None
-    }
-
-    fn display_handler(&self) -> Option<Self::DisplayHandler> {
         None
     }
 

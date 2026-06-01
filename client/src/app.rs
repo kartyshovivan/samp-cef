@@ -596,17 +596,6 @@ fn win_event(msg: UINT, wparam: WPARAM, lparam: LPARAM) -> bool {
         let mut notify_key_down = false;
 
         match msg {
-            WM_SIZE => {
-                let width = (lparam as u32 & 0xFFFF) as usize;
-                let height = ((lparam as u32 >> 16) & 0xFFFF) as usize;
-
-                if width != 0 && height != 0 {
-                    manager.resize(width, height);
-                }
-
-                return false;
-            }
-
             WM_MOUSEMOVE => {
                 let [x, y] = [(lparam as u16) as i32, (lparam >> 16) as u16 as i32];
 

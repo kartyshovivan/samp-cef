@@ -3,9 +3,9 @@ use crate::browser::Browser;
 use crate::handlers::render::{DirtyRects, PaintElement, RenderHandler};
 
 use cef_sys::{
-    cef_accessibility_handler_t, cef_browser_t, cef_drag_data_t, cef_drag_operations_mask_t,
-    cef_paint_element_type_t, cef_range_t, cef_rect_t, cef_render_handler_t, cef_screen_info_t,
-    cef_string_t, cef_text_input_mode_t,
+    HCURSOR, cef_accessibility_handler_t, cef_browser_t, cef_cursor_info_t, cef_cursor_type_t,
+    cef_drag_data_t, cef_drag_operations_mask_t, cef_paint_element_type_t, cef_range_t, cef_rect_t,
+    cef_render_handler_t, cef_screen_info_t, cef_string_t, cef_text_input_mode_t,
 };
 
 unsafe extern "system" fn get_accessibility_handler(
@@ -124,6 +124,13 @@ unsafe extern "system" fn on_accelerated_paint(
     println!("accelerated");
 }
 
+#[allow(dead_code)]
+unsafe extern "system" fn on_cursor_change(
+    _this: *mut cef_render_handler_t, _browser: *mut cef_browser_t, _cursor: HCURSOR,
+    _type_: cef_cursor_type_t::Type, _custom_cursor_info: *const cef_cursor_info_t,
+) {
+}
+
 unsafe extern "system" fn start_dragging(
     _this: *mut cef_render_handler_t, _browser: *mut cef_browser_t,
     _drag_data: *mut cef_drag_data_t, _allowed_ops: cef_drag_operations_mask_t,
@@ -183,6 +190,7 @@ pub fn wrap<T: RenderHandler>(object: T) -> *mut cef_render_handler_t {
     cef_object.on_popup_size = Some(on_popup_size::<T>);
     cef_object.on_paint = Some(on_paint::<T>);
     cef_object.on_accelerated_paint = Some(on_accelerated_paint);
+    // cef_object.on_cursor_change = Some(on_cursor_change::<T>);
     cef_object.start_dragging = Some(start_dragging);
     cef_object.update_drag_cursor = Some(update_drag_cursor::<T>);
     cef_object.on_scroll_offset_changed = Some(on_scroll_offset_changed);

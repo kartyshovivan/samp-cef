@@ -50,14 +50,9 @@ extern "system" fn dialog(_this: *mut cef_client_t) -> *mut cef_dialog_handler_t
 
 // display
 
-extern "system" fn display<I: Client>(this: *mut cef_client_t) -> *mut cef_display_handler_t {
-    let obj: &mut Wrapper<_, I> = Wrapper::unwrap(this);
-
-    if let Some(handler) = obj.interface.display_handler() {
-        super::display_handler::wrap(handler)
-    } else {
-        null_mut()
-    }
+extern "system" fn display(_this: *mut cef_client_t) -> *mut cef_display_handler_t {
+    println!("display");
+    null_mut()
 }
 
 // download
@@ -91,7 +86,8 @@ extern "system" fn focus(_this: *mut cef_client_t) -> *mut cef_focus_handler_t {
 // jsdialog
 
 extern "system" fn jsdialog(_this: *mut cef_client_t) -> *mut cef_jsdialog_handler_t {
-    super::jsdialog_handler::wrap()
+    println!("jsdialog");
+    null_mut()
 }
 
 // keyboard
@@ -178,7 +174,7 @@ pub fn wrap<T: Client>(client: T) -> *mut cef_client_t {
     object.get_find_handler = Some(find);
     object.get_drag_handler = Some(drag);
     object.get_download_handler = Some(download);
-    object.get_display_handler = Some(display::<T>);
+    object.get_display_handler = Some(display);
     object.get_dialog_handler = Some(dialog);
     object.get_context_menu_handler = Some(context_menu::<T>);
     object.get_audio_handler = Some(audio::<T>);

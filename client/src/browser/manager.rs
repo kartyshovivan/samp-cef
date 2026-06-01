@@ -78,7 +78,7 @@ impl Manager {
             clients_on_txd: Vec::new(),
             view_height: 0,
             view_width: 0,
-            prev_fps: 0,
+            prev_fps: 60,
             input_corrupted: false,
             do_not_draw: false,
             cef_running: false,
@@ -188,9 +188,7 @@ impl Manager {
     }
 
     #[inline]
-    pub fn draw(&mut self) {
-        self.sync_display_size();
-
+    pub fn draw(&self) {
         for client in self.clients.values() {
             client.update_view();
         }
@@ -265,16 +263,6 @@ impl Manager {
                 browser.resize(width, height);
             }
         }
-    }
-
-    fn sync_display_size(&mut self) {
-        let [width, height] = crate::utils::client_rect();
-
-        if width == 0 || height == 0 {
-            return;
-        }
-
-        self.resize(width, height);
     }
 
     #[inline]
@@ -530,8 +518,8 @@ impl Manager {
 
     #[inline(always)]
     pub fn update_fps(&mut self, fps: u64) {
-        let fps = fps.clamp(60, 240);
         let fps_small = fps as i32;
+        let fps_small = std::cmp::max(15, fps_small); // std::cmp::min(60, fps_small)
 
         for browser in self.clients.values().filter_map(|client| client.browser()) {
             let host = browser.host();

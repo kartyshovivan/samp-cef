@@ -313,8 +313,27 @@ extern "system" fn resource_get_response_headers(
             set_mime_type(response, mime_type.as_cef_string());
         }
 
+        set_response_header(
+            response,
+            "Cache-Control",
+            "no-store, no-cache, must-revalidate, max-age=0",
+        );
+        set_response_header(response, "Pragma", "no-cache");
+        set_response_header(response, "Expires", "0");
+
         if !response_length.is_null() {
             *response_length = obj.interface.body.len() as i64;
+        }
+    }
+}
+
+unsafe fn set_response_header(response: *mut cef_response_t, name: &str, value: &str) {
+    if let Some(set_header_by_name) = unsafe { (*response).set_header_by_name } {
+        let name = CefString::new(name);
+        let value = CefString::new(value);
+
+        unsafe {
+            set_header_by_name(response, name.as_cef_string(), value.as_cef_string(), 1);
         }
     }
 }
@@ -641,4 +660,3 @@ fn mime_type_for_path(path: &Path) -> &'static str {
         _ => "application/octet-stream",
     }
 }
-

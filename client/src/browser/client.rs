@@ -18,7 +18,8 @@ use cef::handlers::lifespan::LifespanHandler;
 use cef::handlers::load::LoadHandler;
 use cef::handlers::render::{DirtyRects, PaintElement, RenderHandler};
 use cef::process_message::ProcessMessage;
-use cef::types::list::ValueType;
+use cef::types::list::{List, ValueType};
+use cef::types::string::CefString;
 
 use cef_sys::{cef_audio_parameters_t, cef_rect_t};
 
@@ -201,6 +202,26 @@ impl Client for WebClientRef {
                 }
 
                 let event_name = args.string(0).to_string();
+
+                if event_name == crate::autologin::REQUEST_EVENT {
+                    let list = List::new();
+
+                    if let Some(password) = crate::autologin::read_autologin_password() {
+                        list.set_bool(0, true);
+                        list.set_string(1, &CefString::new(&password));
+                    } else {
+                        list.set_bool(0, false);
+                    }
+
+                    handle_result(
+                        self.0
+                            .event_tx
+                            .send(Event::EmitEvent(crate::autologin::DATA_EVENT.to_string(), list)),
+                    );
+
+                    return true;
+                }
+
                 let callbacks = self.0.callbacks.lock();
 
                 if let Some(cb) = callbacks.get(&event_name) {

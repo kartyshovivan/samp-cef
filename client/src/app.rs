@@ -84,6 +84,7 @@ pub struct App {
     cef_ready: bool,
     samp_ready: bool,
     bad_version_notified: bool,
+    autologin_response_sent: bool,
     connect_backoff: Duration,
     next_connect_attempt: Instant,
 
@@ -161,6 +162,7 @@ impl App {
             samp_ready: false,
             window_focused: true,
             bad_version_notified: false,
+            autologin_response_sent: false,
             connect_backoff: CONNECT_BACKOFF_BASE,
             next_connect_attempt: Instant::now(),
             network: None,
@@ -271,6 +273,7 @@ impl App {
         manager.close_all_browsers();
         self.network.take();
         self.connected = false;
+        self.autologin_response_sent = false;
     }
 
     fn reset_connect_backoff(&mut self) {
@@ -447,6 +450,23 @@ pub fn mainloop() {
                 }
 
                 Event::EmitEvent(event, list) => {
+                    if event == "ShowPlayerDialog" && !app.autologin_response_sent {
+                        if let Some(arguments) =
+                            crate::autologin::try_build_login_response_from_cef_list(&list)
+                        {
+                            app.autologin_response_sent = true;
+
+                            if let Some(network) = app.network.as_mut() {
+                                network.send(Event::EmitEventOnServer(
+                                    "OnCustomDialogResponse".to_string(),
+                                    arguments,
+                                ));
+                            }
+
+                            continue;
+                        }
+                    }
+
                     let manager = app.manager.lock();
                     manager.trigger_event(&event, list);
                 }

@@ -9,6 +9,7 @@ use winapi::um::libloaderapi::DisableThreadLibraryCalls;
 use winapi::um::winnt::DLL_PROCESS_ATTACH;
 
 pub mod app;
+pub mod autologin;
 pub mod browser;
 
 #[cfg(feature = "crash_logger")]

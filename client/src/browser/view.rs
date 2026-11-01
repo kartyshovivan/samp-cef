@@ -83,8 +83,11 @@ impl RwContainer {
 impl Drop for RwContainer {
     fn drop(&mut self) {
         unsafe {
+            // RwTextureDestroy also destroys the texture's raster, destroying it again
+            // afterwards is a double free (crash in d3d9 inside RwRasterDestroy).
             if let Some(mut texture) = self.texture.take() {
                 texture.as_mut().destroy();
+                self.raster = None;
             }
 
             if let Some(mut raster) = self.raster.take() {
@@ -110,7 +113,17 @@ impl SpriteContainer {
 
         SpriteContainer { sprite, rw }
     }
+}
 
+impl Drop for SpriteContainer {
+    fn drop(&mut self) {
+        // The texture belongs to `rw`. CSprite2d's destructor would destroy it too,
+        // so detach it before `sprite` is dropped.
+        self.sprite.set_texture(std::ptr::null_mut());
+    }
+}
+
+impl SpriteContainer {
     #[inline]
     pub fn draw(&mut self) {
         let client = crate::utils::client_rect();

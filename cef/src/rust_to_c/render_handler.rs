@@ -116,12 +116,22 @@ unsafe extern "system" fn on_paint<I: RenderHandler>(
     }
 }
 
+#[cfg(target_arch = "x86")]
 unsafe extern "system" fn on_accelerated_paint(
     _this: *mut cef_render_handler_t, _browser: *mut cef_browser_t,
     _type_: cef_paint_element_type_t::Type, _dirty_rects_count: usize,
     _dirty_rects: *const cef_rect_t, _shared_handle: *mut ::std::os::raw::c_void,
 ) {
-    println!("accelerated");
+}
+
+// CEF 156 passes the shared texture as `cef_accelerated_paint_info_t`. Unused: browsers are
+// created without shared textures, frames come through OnPaint.
+#[cfg(not(target_arch = "x86"))]
+unsafe extern "system" fn on_accelerated_paint(
+    _this: *mut cef_render_handler_t, _browser: *mut cef_browser_t,
+    _type_: cef_paint_element_type_t::Type, _dirty_rects_count: usize,
+    _dirty_rects: *const cef_rect_t, _info: *const cef_sys::cef_accelerated_paint_info_t,
+) {
 }
 
 #[allow(dead_code)]

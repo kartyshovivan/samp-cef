@@ -7,6 +7,15 @@ use client_api::gta::sprite::Sprite;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
+use winapi::shared::d3d9::IDirect3DTexture9;
+use winapi::shared::d3d9types::{
+    D3DLOCKED_RECT, D3DPOOL_DEFAULT, D3DPOOL_MANAGED, D3DSURFACE_DESC, D3DUSAGE_DYNAMIC,
+};
+use winapi::shared::windef::RECT;
+
+/// `RwD3D9RasterExtOffset` in gta_sa.exe 1.0 US: offset of the D3D9 plugin data inside RwRaster.
+const D3D9_RASTER_EXT_OFFSET: usize = 0xB4E9E0;
+
 pub struct RwLockGuard<'a> {
     bytes: &'a mut [u8],
     pub pitch: usize,
@@ -47,6 +56,8 @@ impl Drop for RwLockGuard<'_> {
 pub struct RwContainer {
     texture: Option<NonNull<RwTexture>>,
     raster: Option<NonNull<RwRaster>>,
+    /// D3D9 texture behind `raster`. `None` = not resolved yet, `Some(None)` = unavailable.
+    d3d_texture: Option<Option<NonNull<IDirect3DTexture9>>>,
 }
 
 impl RwContainer {
@@ -57,7 +68,55 @@ impl RwContainer {
         RwContainer {
             texture: NonNull::new(texture),
             raster: NonNull::new(raster),
+            d3d_texture: None,
         }
+    }
+
+    fn d3d_texture(&mut self) -> Option<NonNull<IDirect3DTexture9>> {
+        if self.d3d_texture.is_none() {
+            let resolved = self.raster.and_then(|raster| unsafe { resolve_d3d_texture(raster) });
+
+            log::trace!("RwContainer: direct D3D9 upload available: {}", resolved.is_some());
+            self.d3d_texture = Some(resolved);
+        }
+
+        self.d3d_texture.flatten()
+    }
+
+    /// Uploads `rects` (already clipped to the texture) straight into the D3D9 texture,
+    /// locking only those regions so the driver re-uploads just the changed pixels.
+    /// Returns `false` if the fast path isn't available; nothing is guaranteed to be
+    /// written in that case and the caller must fall back to a full RW lock.
+    fn upload_rects(&mut self, bytes: &[u8], src_pitch: usize, rects: &[RECT]) -> bool {
+        let Some(texture) = self.d3d_texture() else {
+            return false;
+        };
+
+        unsafe {
+            let texture = &*texture.as_ptr();
+
+            for rect in rects {
+                let mut locked = std::mem::zeroed::<D3DLOCKED_RECT>();
+
+                if texture.LockRect(0, &mut locked, rect, 0) < 0 || locked.pBits.is_null() {
+                    return false;
+                }
+
+                let dst = locked.pBits as *mut u8;
+                let len = (rect.right - rect.left) as usize * 4;
+                let x = rect.left as usize * 4;
+
+                for row in 0..(rect.bottom - rect.top) as usize {
+                    let src = bytes.as_ptr().add((rect.top as usize + row) * src_pitch + x);
+                    let dst = dst.add(row * locked.Pitch as usize);
+                    std::ptr::copy_nonoverlapping(src, dst, len);
+                }
+
+                texture.UnlockRect(0);
+            }
+        }
+
+        true
     }
 
     #[inline]
@@ -94,6 +153,55 @@ impl Drop for RwContainer {
                 raster.as_mut().destroy();
             }
         }
+    }
+}
+
+/// Finds the `IDirect3DTexture9` of an RW raster. The plugin-data offset is verified by
+/// locking the raster through RW and checking that the D3D9 extension recorded the same
+/// locked pointer and pitch, then the texture's description is checked as well.
+unsafe fn resolve_d3d_texture(raster: NonNull<RwRaster>) -> Option<NonNull<IDirect3DTexture9>> {
+    unsafe {
+        let ext_offset = *(D3D9_RASTER_EXT_OFFSET as *const i32);
+
+        if !(0x20..=0x400).contains(&ext_offset) {
+            return None;
+        }
+
+        let raster = &mut *raster.as_ptr();
+        let ext = (raster as *mut RwRaster as *mut u8).add(ext_offset as usize);
+
+        let bits = raster.lock(0);
+        if bits.is_null() {
+            return None;
+        }
+
+        let stride = raster.stride;
+        let verified = (4..48).step_by(4).any(|i| {
+            let pitch = *(ext.add(i) as *const i32);
+            let pbits = *(ext.add(i + 4) as *const *mut u8);
+            pitch == stride && pbits == bits
+        });
+
+        raster.unlock();
+
+        if !verified {
+            return None;
+        }
+
+        let texture = NonNull::new(*(ext as *const *mut IDirect3DTexture9))?;
+
+        let mut desc = std::mem::zeroed::<D3DSURFACE_DESC>();
+        if (*texture.as_ptr()).GetLevelDesc(0, &mut desc) < 0
+            || desc.Width as i32 != raster.width
+            || desc.Height as i32 != raster.height
+        {
+            return None;
+        }
+
+        let lockable = desc.Pool == D3DPOOL_MANAGED
+            || (desc.Pool == D3DPOOL_DEFAULT && desc.Usage & D3DUSAGE_DYNAMIC != 0);
+
+        lockable.then_some(texture)
     }
 }
 
@@ -174,6 +282,13 @@ impl ViewContainer {
         }
     }
 
+    fn rw_mut(&mut self) -> &mut RwContainer {
+        match self {
+            ViewContainer::Display(sprite) => &mut sprite.rw,
+            ViewContainer::Material(rw) => rw,
+        }
+    }
+
     fn texture(&self) -> Option<NonNull<RwTexture>> {
         match self {
             ViewContainer::Display(sprite) => sprite.rw.texture,
@@ -229,21 +344,57 @@ impl View {
     }
 
     #[inline(always)]
-    pub fn update_texture(&mut self, bytes: &[u8], rects: &[cef_rect_t]) {
-        if let Some(mut dest) = self.container.as_mut().and_then(|rw| rw.bytes()) {
-            let pitch = dest.pitch;
-            let dest = &mut *dest;
+    pub fn update_texture(&mut self, bytes: &[u8], src_width: usize, rects: &[cef_rect_t]) {
+        let (view_width, view_height) = (self.width, self.height);
 
-            let dest = dest.as_mut_ptr();
+        let Some(container) = self.container.as_mut() else {
+            return;
+        };
+
+        let src_pitch = src_width * 4;
+        let max_w = std::cmp::min(view_width, src_width) as i32;
+        let max_h = std::cmp::min(view_height, bytes.len() / src_pitch.max(1)) as i32;
+
+        let clipped: Vec<RECT> = rects
+            .iter()
+            .filter_map(|r| {
+                let left = r.x.max(0);
+                let top = r.y.max(0);
+                let right = (r.x + r.width).min(max_w);
+                let bottom = (r.y + r.height).min(max_h);
+
+                (right > left && bottom > top).then_some(RECT {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                })
+            })
+            .collect();
+
+        if clipped.is_empty() {
+            return;
+        }
+
+        if container.rw_mut().upload_rects(bytes, src_pitch, &clipped) {
+            return;
+        }
+
+        // Fallback: lock the whole raster through RenderWare.
+        if let Some(mut dest) = container.bytes() {
+            let dst_pitch = dest.pitch;
+            let dest = dest.bytes_as_mut_ptr();
             let pixels_origin = bytes.as_ptr();
 
-            for cef_rect in rects {
-                for y in cef_rect.y as usize..(cef_rect.y as usize + cef_rect.height as usize) {
+            for rect in &clipped {
+                let len = (rect.right - rect.left) as usize * 4;
+                let x = rect.left as usize * 4;
+
+                for y in rect.top as usize..rect.bottom as usize {
                     unsafe {
-                        let index = pitch * y + cef_rect.x as usize * 4;
-                        let ptr = dest.add(index);
-                        let pixels = pixels_origin.add(index);
-                        std::ptr::copy(pixels, ptr, cef_rect.width as usize * 4);
+                        let ptr = dest.add(dst_pitch * y + x);
+                        let pixels = pixels_origin.add(src_pitch * y + x);
+                        std::ptr::copy_nonoverlapping(pixels, ptr, len);
                     }
                 }
             }

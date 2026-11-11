@@ -17,6 +17,7 @@ pub mod crash_logger;
 pub mod external;
 pub mod network;
 pub mod render;
+pub mod snapshot;
 pub mod rodio_audio;
 pub mod static_cell;
 pub mod utils;

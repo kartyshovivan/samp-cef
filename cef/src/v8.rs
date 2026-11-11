@@ -375,6 +375,8 @@ impl V8Value {
     }
 }
 
+/// Removed in newer CEF (extensions are gone); only available with the 32-bit CEF 89.
+#[cfg(target_arch = "x86")]
 pub fn register_extension<T: V8Handler>(
     extension_name: CefString, javascript_code: CefString, handler: Option<T>,
 ) {

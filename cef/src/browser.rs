@@ -227,6 +227,16 @@ impl BrowserHost {
         }
     }
 
+    /// Issues a BeginFrame request. Only valid for browsers created with
+    /// `external_begin_frame_enabled`. CEF forwards the call to its UI thread itself.
+    pub fn send_external_begin_frame(&self) {
+        let send = self.inner.send_external_begin_frame.unwrap();
+
+        unsafe {
+            send(self.inner.get_mut());
+        }
+    }
+
     pub fn windowless_frame_rate(&self) -> i32 {
         let get = self.inner.get_windowless_frame_rate.unwrap();
 
@@ -266,7 +276,10 @@ impl Frame {
     }
 
     pub fn context(&self) -> V8Context {
+        #[cfg(target_arch = "x86")]
         let get_ctx = self.inner.get_v8context.unwrap();
+        #[cfg(not(target_arch = "x86"))]
+        let get_ctx = self.inner.get_v8_context.unwrap();
         let ctx = unsafe { get_ctx(self.inner.get_mut()) };
 
         V8Context::from_raw(ctx)

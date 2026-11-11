@@ -137,7 +137,7 @@ impl From<cef_string_userfree_t> for CefString {
 }
 
 pub fn into_cef_string(string: &str) -> cef_string_t {
-    extern "C" fn free(ptr: *mut u16) {
+    fn release(ptr: *mut u16) {
         if ptr.is_null() {
             return;
         }
@@ -145,6 +145,17 @@ pub fn into_cef_string(string: &str) -> cef_string_t {
         unsafe {
             let _ = widestring::U16CString::from_raw(ptr);
         }
+    }
+
+    // `dtor` is a plain C callback; the 64-bit bindings spell it extern "system" (same ABI).
+    #[cfg(target_arch = "x86")]
+    extern "C" fn free(ptr: *mut u16) {
+        release(ptr)
+    }
+
+    #[cfg(not(target_arch = "x86"))]
+    unsafe extern "system" fn free(ptr: *mut u16) {
+        release(ptr)
     }
 
     let wide = widestring::U16CString::from_str_truncate(string);

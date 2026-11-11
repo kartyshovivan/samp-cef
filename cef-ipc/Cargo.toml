@@ -1,0 +1,9 @@
+[package]
+name = "cef-ipc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "IPC between client.dll (game process) and cef_host.exe (out-of-process CEF)"
+
+[dependencies]
+winapi = { version = "0.3.9", features = ["namedpipeapi", "fileapi", "handleapi", "memoryapi", "winbase", "winnt", "winerror", "minwindef", "errhandlingapi", "synchapi"] }

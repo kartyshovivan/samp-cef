@@ -3,10 +3,8 @@ use crate::audio::{Audio, BrowserAudioSettings};
 use crate::browser::client::WebClient;
 use crate::external::{BrowserReadyCallback, CallbackList};
 
-use cef::handlers::render::PaintElement;
 use cef::types::list::List;
-use cef::types::string::CefString;
-use cef_sys::{cef_event_flags_t, cef_key_event_t, cef_mouse_button_type_t, cef_mouse_event_t};
+use cef_sys::{cef_event_flags_t, cef_key_event_t};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -15,6 +13,47 @@ use client_api::gta::rw::rwcore::RwTexture;
 use client_api::gta::rw::rwplcore::RwSurfaceProperties;
 
 use crossbeam_channel::Sender;
+
+/// Paces game-driven BeginFrames: every `n`-th game frame, with `n` chosen so the UI stays at
+/// or just under 60 fps. A whole divisor keeps the cadence even (144 fps game -> every 3rd
+/// frame = 48 fps), which looks smoother than alternating 2/3-frame gaps.
+struct FramePacer {
+    last: Option<std::time::Instant>,
+    avg_dt: f32,
+    counter: u32,
+}
+
+impl FramePacer {
+    const TARGET_DT: f32 = 1.0 / 60.0;
+
+    fn new() -> Self {
+        Self { last: None, avg_dt: Self::TARGET_DT, counter: 0 }
+    }
+
+    /// Called once per game frame. Returns `true` if CEF should get a BeginFrame now.
+    fn tick(&mut self) -> bool {
+        let now = std::time::Instant::now();
+
+        if let Some(last) = self.last.replace(now) {
+            let dt = now.duration_since(last).as_secs_f32().clamp(0.001, 0.25);
+            self.avg_dt += (dt - self.avg_dt) * 0.05;
+        }
+
+        // 10% slack so a 120 fps game reliably maps to every 2nd frame, not every 3rd.
+        let divisor = ((Self::TARGET_DT / self.avg_dt) - 0.1).ceil().max(1.0) as u32;
+
+        self.counter += 1;
+        if self.counter >= divisor {
+            self.counter = 0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+const MIN_BROWSER_FPS: u64 = 30;
+const MAX_BROWSER_FPS: u64 = 60;
 
 #[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, Eq, PartialEq)]
 pub enum MouseKey {
@@ -56,6 +95,14 @@ pub struct Manager {
     view_width: usize,
     view_height: usize,
     prev_fps: u64,
+    /// Frame rate last applied to each browser. `BrowserHost::GetWindowlessFrameRate`
+    /// is UI-thread only (returns 0 elsewhere), so we track it ourselves.
+    applied_fps: HashMap<u32, i32>,
+    /// Latest mouse move not yet sent: (browser id, x, y, modifiers). Moves are coalesced to
+    /// one per game frame; high-rate mice otherwise flood the page with events (each one
+    /// runs JS such as drag-scroll handlers) and the UI drops frames.
+    pending_mouse_move: Option<(u32, i32, i32, u32)>,
+    frame_pacer: FramePacer,
     cef_running: bool,
 }
 
@@ -79,6 +126,9 @@ impl Manager {
             view_height: 0,
             view_width: 0,
             prev_fps: 60,
+            applied_fps: HashMap::new(),
+            pending_mouse_move: None,
+            frame_pacer: FramePacer::new(),
             input_corrupted: false,
             do_not_draw: false,
             cef_running: false,
@@ -99,6 +149,8 @@ impl Manager {
             render_mode
         );
 
+        self.close_browser(id, true);
+
         let client = WebClient::new(id, cbs, self.event_tx.clone());
 
         log::trace!("crate::browser::cef::create_browser");
@@ -109,6 +161,8 @@ impl Manager {
 
     pub fn create_browser_on_texture(&mut self, ext: &ExternalBrowser, cbs: CallbackList) {
         log::trace!("manager::create_browser_on_texture({:?})", ext);
+
+        self.close_browser(ext.id, true);
 
         let client = WebClient::new_extern(ext.id, cbs, self.event_tx.clone(), self.audio.clone());
 
@@ -188,7 +242,25 @@ impl Manager {
     }
 
     #[inline]
-    pub fn draw(&self) {
+    pub fn draw(&mut self) {
+        crate::browser::stats::game_frame();
+
+        // Follow the game window size (fullscreen <-> windowed, window resize). Nothing else
+        // called `resize`, so after switching to a window the page kept its fullscreen size,
+        // was drawn stretched and mouse coordinates no longer matched it.
+        let [width, height] = crate::utils::client_rect();
+        if width > 0 && height > 0 && (width != self.view_width || height != self.view_height) {
+            self.resize(width, height);
+        }
+
+        self.flush_mouse_move();
+
+        if crate::browser::host::external_frames() && self.frame_pacer.tick() {
+            for client in self.clients.values().filter(|c| c.is_created() && !c.is_hidden()) {
+                client.send_begin_frame();
+            }
+        }
+
         for client in self.clients.values() {
             client.update_view();
         }
@@ -234,10 +306,6 @@ impl Manager {
 
         for client in self.clients.values() {
             client.on_reset_device();
-
-            if let Some(host) = client.browser().map(|browser| browser.host()) {
-                host.invalidate(PaintElement::View)
-            }
         }
     }
 
@@ -271,29 +339,36 @@ impl Manager {
             return;
         }
 
-        if let Some(client) = self.focused.as_ref().and_then(|id| self.clients.get(id))
-            && let Some(host) = client.browser().map(|browser| browser.host())
-        {
+        if let Some(client) = self.focused.as_ref().and_then(|id| self.clients.get(id)) {
             self.mouse.x = x;
             self.mouse.y = y;
 
             let keys = &self.mouse.keys;
-
-            let mut event = cef_mouse_event_t { x, y, modifiers: 0 };
+            let mut modifiers = 0;
 
             if keys.get(&MouseKey::Left).cloned().unwrap_or(false) {
-                event.modifiers |= cef_event_flags_t::EVENTFLAG_LEFT_MOUSE_BUTTON as u32;
+                modifiers |= cef_event_flags_t::EVENTFLAG_LEFT_MOUSE_BUTTON as u32;
             }
 
             if keys.get(&MouseKey::Middle).cloned().unwrap_or(false) {
-                event.modifiers |= cef_event_flags_t::EVENTFLAG_MIDDLE_MOUSE_BUTTON as u32;
+                modifiers |= cef_event_flags_t::EVENTFLAG_MIDDLE_MOUSE_BUTTON as u32;
             }
 
             if keys.get(&MouseKey::Right).cloned().unwrap_or(false) {
-                event.modifiers |= cef_event_flags_t::EVENTFLAG_RIGHT_MOUSE_BUTTON as u32;
+                modifiers |= cef_event_flags_t::EVENTFLAG_RIGHT_MOUSE_BUTTON as u32;
             }
 
-            host.send_mouse_move(event);
+            self.pending_mouse_move = Some((client.id(), x, y, modifiers));
+        }
+    }
+
+    /// Sends the coalesced mouse move, if any. Called once per frame and before clicks and
+    /// wheel events so their order relative to the move is preserved.
+    fn flush_mouse_move(&mut self) {
+        if let Some((id, x, y, modifiers)) = self.pending_mouse_move.take()
+            && let Some(client) = self.clients.get(&id)
+        {
+            client.send_mouse_move(x, y, modifiers);
         }
     }
 
@@ -303,37 +378,31 @@ impl Manager {
             return;
         }
 
-        if let Some(client) = self.focused.as_ref().and_then(|id| self.clients.get(id))
-            && let Some(host) = client.browser().map(|browser| browser.host())
-        {
+        self.flush_mouse_move();
+
+        if let Some(client) = self.focused.as_ref().and_then(|id| self.clients.get(id)) {
             self.mouse.keys.insert(button, is_down);
 
-            let event = cef_mouse_event_t {
-                x: self.mouse.x,
-                y: self.mouse.y,
-                modifiers: 0,
-            };
-
             let key = match button {
-                MouseKey::Left => cef_mouse_button_type_t::MBT_LEFT,
-                MouseKey::Middle => cef_mouse_button_type_t::MBT_MIDDLE,
-                MouseKey::Right => cef_mouse_button_type_t::MBT_RIGHT,
+                MouseKey::Left => cef_ipc::proto::MOUSE_LEFT,
+                MouseKey::Middle => cef_ipc::proto::MOUSE_MIDDLE,
+                MouseKey::Right => cef_ipc::proto::MOUSE_RIGHT,
             };
 
-            host.send_mouse_click(key, event, is_down);
+            client.send_mouse_click(self.mouse.x, self.mouse.y, key, is_down);
         }
     }
 
     #[inline]
-    pub fn send_mouse_wheel(&self, delta: i32) {
+    pub fn send_mouse_wheel(&mut self, delta: i32) {
         if self.input_corrupted {
             return;
         }
 
-        if let Some(client) = self.focused.as_ref().and_then(|id| self.clients.get(id))
-            && let Some(host) = client.browser().map(|browser| browser.host())
-        {
-            host.send_mouse_wheel(self.mouse.x, self.mouse.y, delta);
+        self.flush_mouse_move();
+
+        if let Some(client) = self.focused.as_ref().and_then(|id| self.clients.get(id)) {
+            client.send_mouse_wheel(self.mouse.x, self.mouse.y, delta);
         }
     }
 
@@ -344,34 +413,20 @@ impl Manager {
         }
 
         // отправлять события клавиш ТОЛЬКО сфокусированному браузеру. иначе можно и другим запросившим
-        if let Some(client) = self.focused.as_ref().and_then(|id| self.clients.get(id))
-            && let Some(host) = client.browser().map(|browser| browser.host())
-        {
-            host.send_keyboard_event(event);
+        if let Some(client) = self.focused.as_ref().and_then(|id| self.clients.get(id)) {
+            client.send_key(&event);
         } else {
-            for host in self
-                .clients
-                .values()
-                .filter(|client| client.always_listen_keys())
-                .filter_map(|client| client.browser().map(|browser| browser.host()))
-            {
-                host.send_keyboard_event(event);
+            for client in self.clients.values().filter(|client| client.always_listen_keys()) {
+                client.send_key(&event);
             }
         }
     }
 
     pub fn trigger_event(&self, event_name: &str, list: List) {
-        for client in self.clients.values() {
-            if let Some(frame) = client.browser().map(|browser| browser.main_frame()) {
-                let name = CefString::new(event_name);
-                let msg = cef::process_message::ProcessMessage::create("trigger_event");
+        let args = crate::browser::host::list_to_value(&list);
 
-                let args = msg.argument_list();
-                args.set_string(0, &name);
-                args.set_list(1, list.clone());
-
-                frame.send_process_message(cef::ProcessId::Renderer, msg);
-            }
+        for client in self.clients.values().filter(|client| client.is_created()) {
+            client.trigger_event(event_name, &args);
         }
     }
 
@@ -461,8 +516,7 @@ impl Manager {
     pub fn browser_ready(&self, browser_id: u32) -> bool {
         self.clients
             .get(&browser_id)
-            .and_then(|client| client.browser())
-            .map(|browser| !browser.is_loading())
+            .map(|client| client.is_ready())
             .unwrap_or(false)
     }
 
@@ -518,15 +572,28 @@ impl Manager {
 
     #[inline(always)]
     pub fn update_fps(&mut self, fps: u64) {
-        let fps_small = fps as i32;
-        let fps_small = std::cmp::max(15, fps_small); // std::cmp::min(60, fps_small)
+        // CEF can't present faster than the game uploads the texture, but never drop the
+        // UI below 30 and never above CEF's own 60 fps cap. Small jitter is ignored so we
+        // don't hammer `set_windowless_frame_rate` every second.
+        let target = fps.clamp(MIN_BROWSER_FPS, MAX_BROWSER_FPS);
 
-        for browser in self.clients.values().filter_map(|client| client.browser()) {
-            let host = browser.host();
+        if self.prev_fps.abs_diff(target) >= 5 || target == MAX_BROWSER_FPS {
+            self.prev_fps = target;
+        }
 
-            if self.prev_fps != fps {
-                host.set_windowless_frame_rate(fps_small);
-                self.prev_fps = fps;
+        let target = self.prev_fps as i32;
+        let applied = &mut self.applied_fps;
+
+        applied.retain(|id, _| self.clients.contains_key(id));
+
+        for (&id, client) in self.clients.iter() {
+            if applied.get(&id) == Some(&target) {
+                continue;
+            }
+
+            if client.is_created() {
+                client.set_frame_rate(target);
+                applied.insert(id, target);
             }
         }
     }
@@ -564,9 +631,8 @@ impl Manager {
             return;
         }
 
-        log::trace!("PRE cef::shutdown()");
-        cef::shutdown();
-        log::trace!("POST cef::shutdown()");
+        crate::browser::cef::shutdown();
+        self.cef_running = false;
     }
 
     pub fn remove_views(&mut self) {

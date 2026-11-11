@@ -11,9 +11,12 @@ members = [
     "cef-api",
     "cef-interface",
     "network",
+    "cef-ipc",
+    "cef-host",
 ]
 
 
 [profile.release]
 # lto = true
 opt-level = "z"
+

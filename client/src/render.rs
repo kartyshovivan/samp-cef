@@ -20,9 +20,13 @@ const REFERENCE_FRAMES: u64 = 10;
 
 const DRAWING_EVENT: usize = 0x58FAE0;
 const SHUTDOWN_RW_EVENT: usize = 0x53BB80;
+/// CGame::Process: runs once per frame before the scene camera starts updating, so offscreen
+/// RenderWare rendering (model snapshots) can use its own camera there.
+const GAME_PROCESS: usize = 0x53BEE0;
 
 type DrawingEventFn = extern "C" fn();
 type ShutdownRwEventFn = extern "C" fn();
+type GameProcessFn = extern "C" fn();
 
 struct FrameCounter {
     start_at: Instant,
@@ -35,6 +39,7 @@ struct Render {
     centity_render: GenericDetour<extern "thiscall" fn(obj: *mut CEntity)>,
     drawing_event: GenericDetour<DrawingEventFn>,
     shutdown_event: GenericDetour<ShutdownRwEventFn>,
+    game_process: GenericDetour<GameProcessFn>,
     counter: FrameCounter,
 }
 
@@ -91,6 +96,14 @@ pub fn initialize(manager: Arc<Mutex<Manager>>) {
         hook
     };
 
+    let game_process = unsafe {
+        let func: GameProcessFn = std::mem::transmute(GAME_PROCESS);
+        let hook = GenericDetour::new(func, game_process).unwrap();
+
+        hook.enable().unwrap();
+        hook
+    };
+
     log::trace!("hooking ok ...");
 
     let counter = FrameCounter {
@@ -104,6 +117,7 @@ pub fn initialize(manager: Arc<Mutex<Manager>>) {
         centity_render,
         drawing_event,
         shutdown_event,
+        game_process,
         counter,
     };
 
@@ -120,6 +134,91 @@ pub fn uninitialize() {
 
 fn on_render() {
     crate::app::mainloop();
+
+    // Browsers go under SA:MP's own interface (chat, dialogs, scoreboard) and under overlays
+    // that other plugins draw in Present (e.g. ORP's voice chat): they are drawn here, with
+    // the game's HUD. `cef/draw_over_samp` restores the old order (from the SA:MP death window
+    // hook, on top of SA:MP's interface).
+    if !draw_over_samp() {
+        render();
+        draw_samp_chat();
+    }
+}
+
+// ---- SA:MP chat with the HUD (0.3.7-R3) ------------------------------------------------------
+//
+// SA:MP draws its chat late (with the death window and the chat input), after textdraws, so
+// the chat covered textdraw interfaces. With the browsers drawn at the HUD stage the chat is
+// drawn right after them instead: over the browsers, under textdraws.
+
+const CHAT_DRAW_R3: usize = 0x67680; // CChat::Draw
+const CHAT_PTR_R3: usize = 0x26E8C8; // CChat*
+
+type ChatDrawFn = extern "thiscall" fn(chat: *mut c_void);
+
+static CHAT_DRAW: StaticCell<GenericDetour<ChatDrawFn>> = StaticCell::new();
+static CHAT_FROM_HUD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Called once SA:MP is loaded.
+pub fn hook_samp_chat() {
+    if draw_over_samp()
+        || client_api::samp::version::version() != client_api::samp::version::Version::V037R3
+        || unsafe { CHAT_DRAW.get_mut() }.is_some()
+    {
+        return;
+    }
+
+    let base = client_api::samp::handle();
+    if base.is_null() {
+        return;
+    }
+
+    unsafe {
+        let func: ChatDrawFn = std::mem::transmute(base.add(CHAT_DRAW_R3));
+        match GenericDetour::new(func, chat_draw) {
+            Ok(hook) if hook.enable().is_ok() => {
+                CHAT_DRAW.set(hook);
+                log::info!("SA:MP chat drawn with the HUD");
+            }
+            _ => log::warn!("couldn't hook SA:MP chat drawing"),
+        }
+    }
+}
+
+extern "thiscall" fn chat_draw(chat: *mut c_void) {
+    // SA:MP's own (late) call is skipped; ours from the HUD stage goes through.
+    if CHAT_FROM_HUD.load(std::sync::atomic::Ordering::Relaxed)
+        && let Some(hook) = unsafe { CHAT_DRAW.get_mut() }
+    {
+        hook.call(chat);
+    }
+}
+
+fn draw_samp_chat() {
+    let Some(hook) = (unsafe { CHAT_DRAW.get_mut() }) else {
+        return;
+    };
+
+    unsafe {
+        let chat = *(client_api::samp::handle().add(CHAT_PTR_R3) as *const *mut c_void);
+        if chat.is_null() {
+            return;
+        }
+
+        CHAT_FROM_HUD.store(true, std::sync::atomic::Ordering::Relaxed);
+        hook.call(chat);
+        CHAT_FROM_HUD.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// `cef/draw_over_samp`: draw browsers on top of SA:MP's interface, as before.
+pub fn draw_over_samp() -> bool {
+    static OVER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OVER.get_or_init(|| {
+        let over = crate::utils::cef_dir().join("draw_over_samp").exists();
+        log::info!("browsers drawn {}", if over { "over SA:MP interface" } else { "with the game HUD" });
+        over
+    })
 }
 
 pub fn render() {
@@ -159,6 +258,15 @@ extern "C" fn drawing_event() {
     }
 
     on_render();
+}
+
+extern "C" fn game_process() {
+    if let Some(render) = Render::get() {
+        render.game_process.call();
+    }
+
+    // Between frames: the scene camera isn't updating, snapshots can render offscreen.
+    crate::snapshot::process_frame();
 }
 
 extern "C" fn shutdown_event() {

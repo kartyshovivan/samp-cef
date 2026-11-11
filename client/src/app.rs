@@ -84,6 +84,8 @@ pub struct App {
     cef_ready: bool,
     samp_ready: bool,
     bad_version_notified: bool,
+    /// The left button went down on a SA:MP textdraw: its button-up goes to SA:MP too.
+    textdraw_click: bool,
     autologin_response_sent: bool,
     connect_backoff: Duration,
     next_connect_attempt: Instant,
@@ -162,6 +164,7 @@ impl App {
             samp_ready: false,
             window_focused: true,
             bad_version_notified: false,
+            textdraw_click: false,
             autologin_response_sent: false,
             connect_backoff: CONNECT_BACKOFF_BASE,
             next_connect_attempt: Instant::now(),
@@ -208,8 +211,12 @@ impl App {
             }
         });
 
+        crate::render::hook_samp_chat();
+
         client_api::samp::deathwindow::DeathWindow::on_draw(|| {
-            crate::render::render();
+            if crate::render::draw_over_samp() {
+                crate::render::render();
+            }
         });
 
         client_api::gta::game::on_shutdown(|| {
@@ -609,6 +616,33 @@ pub fn mainloop() {
     }
 }
 
+/// SA:MP 0.3.7-R3 textdraw selection (`SelectTextDraw`) is on and the cursor is over a
+/// selectable textdraw (SA:MP tracks the hovered one itself).
+fn textdraw_hovered() -> bool {
+    // CTextDrawSelection*: { BOOL m_bIsActive; D3DCOLOR m_hoveredColor; ID m_nHoveredId; }
+    const TEXTDRAW_SELECTION_R3: usize = 0x26E8B0;
+
+    if client_api::samp::version::version() != client_api::samp::version::Version::V037R3 {
+        return false;
+    }
+
+    unsafe {
+        let base = client_api::samp::handle();
+        if base.is_null() {
+            return false;
+        }
+
+        let selection = *(base.add(TEXTDRAW_SELECTION_R3) as *const *const u8);
+        if selection.is_null() {
+            return false;
+        }
+
+        let active = *(selection as *const i32) != 0;
+        let hovered = *(selection.add(8) as *const u16);
+        active && hovered != 0xFFFF
+    }
+}
+
 // TODO: Save key state. Mouse too?
 fn win_event(msg: UINT, wparam: WPARAM, lparam: LPARAM) -> bool {
     if let Some(app) = App::get() {
@@ -620,6 +654,13 @@ fn win_event(msg: UINT, wparam: WPARAM, lparam: LPARAM) -> bool {
                 let [x, y] = [(lparam as u16) as i32, (lparam >> 16) as u16 as i32];
 
                 manager.send_mouse_move_event(x, y);
+            }
+
+            // A selectable SA:MP textdraw under the cursor (SelectTextDraw) is drawn over the
+            // browsers, so it gets the click, not the focused browser.
+            WM_LBUTTONDOWN | WM_LBUTTONUP if app.textdraw_click || textdraw_hovered() => {
+                app.textdraw_click = msg == WM_LBUTTONDOWN;
+                return false;
             }
 
             WM_LBUTTONDOWN => manager.send_mouse_click_event(MouseKey::Left, true),

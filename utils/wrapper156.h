@@ -1,0 +1,7 @@
+#include "include/cef_api_hash.h"
+#include "include/capi/cef_base_capi.h"
+#include "include/capi/cef_app_capi.h"
+#include "include/capi/cef_client_capi.h"
+#include "include/capi/cef_scheme_capi.h"
+#include "include/capi/cef_v8_capi.h"
+#include "include/capi/cef_process_message_capi.h"
